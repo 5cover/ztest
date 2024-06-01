@@ -71,4 +71,8 @@ Except for `-h` and `-L`, all FILE-related tests dereference symbolic links.  Be
 > `[` honors the `--help` and `--version` options, but test does not.  test treats each of those as it treats any other  nonempty STRING.
 
 > [!NOTE]
-> your shell may have its own version of `test` and/or `[`, which usually supersedes the version described here.  Please refer to your shell's documentation for details about the options it supports.
+> Being represented on 64 bits, integers and file descriptors outside the range $[-2^{63},2^{63}[$ are intepreted as strings.
+
+## Differences with GNU `test`
+
+1. Unlike GNU test, This implementation gives predecens to the `-a` and `-o` binary operators.
