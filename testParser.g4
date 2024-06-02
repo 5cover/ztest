@@ -6,27 +6,25 @@ options {
     tokenVocab = testLexer;
 }
 
-test: expression EOF;
+expression: or EOF;
 
-expression: or;
+or: and (O and)*;
 
-or: and (OR or)?;
-
-and: primary (AND primary)?;
+and: primary (A primary)*;
 
 primary
-    : bracketed
-    | not
-    | unary_string
+    : unary_string
     | unary_file
     | unary_fd
     | binary_file
     | binary_integer
     | binary_string
+    | bracketed
+    | not
+    | FD
     | INTEGER
-    | STRING
     | FILE
-    | FD;
+    | STRING;
 
 bracketed: RPAREN expression LPAREN;
 

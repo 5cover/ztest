@@ -1,5 +1,5 @@
 const std = @import("std");
-const lexer = @import("lexer.zig");
+const parser = @import("parser.zig");
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
@@ -12,10 +12,6 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2) {
-        return error.ExpectedArgument;
-    }
-
     if (args.len == 2) {
         if (std.mem.eql(u8, args[1], "--version")) {
             try stdout.writeAll("ztest 0.0.0\n");
@@ -27,10 +23,22 @@ pub fn main() !void {
         }
     }
 
-    const tokens = try lexer.lex(allocator, args);
+    //try dumpArgs(stdout, args);
 
-    for (0.., tokens) |i, t| {
-        std.debug.print("{}. {} {} {}\n", .{ i, t.index, t.length, t.value });
+    try stdout.writeAll("AST\n");
+
+    const ast = try parser.parse(allocator, args);
+
+    if (ast) |val| {
+        try val.prettyPrint(stdout);
+    } else {
+        try stdout.writeAll("empty\n");
+    }
+}
+
+fn dumpArgs(w: std.fs.File.Writer, args: []const []const u8) !void {
+    for (1.., args) |i, arg| {
+        try w.print("#{d} {s}\n", .{ i, arg });
     }
 }
 
@@ -96,4 +104,5 @@ const help =
     \\Except for -h and -L, all FILE-related tests dereference symbolic links.
     \\Beware that parentheses need to be escaped (e.g., by backslashes) for shells.
     \\INTEGER may also be -l STRING, which evaluates to the length of STRING.
+    \\
 ;
