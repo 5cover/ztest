@@ -1,7 +1,8 @@
 const std = @import("std");
 const parser = @import("parser.zig");
+const evaluator = @import("evaluator.zig");
 
-pub fn main() !void {
+pub fn main() !u8 {
     const stdout = std.io.getStdOut().writer();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -15,31 +16,44 @@ pub fn main() !void {
     if (args.len == 2) {
         if (std.mem.eql(u8, args[1], "--version")) {
             try stdout.writeAll("ztest 0.0.0\n");
-            return;
+            return 0;
         }
         if (std.mem.eql(u8, args[1], "--help")) {
             try stdout.writeAll(help);
-            return;
+            return 0;
         }
     }
 
     //try dumpArgs(stdout, args);
 
-    try stdout.writeAll("AST\n");
+    const result: u2 = run: {
+        const ast = parser.parse(allocator, args) catch |err| {
+            std.log.err("{}\n", .{err});
+            break :run 2;
+        };
 
-    const ast = try parser.parse(allocator, args);
+        try dumpAst(stdout, ast);
 
-    if (ast) |val| {
-        try val.prettyPrint(stdout);
-    } else {
-        try stdout.writeAll("empty\n");
-    }
+        break :run if (ast) |vast| @intFromBool(!(evaluator.evaluate(vast) catch |err| {
+            std.log.err("{}\n", .{err});
+            break :run 2;
+        })) else 1;
+    };
+
+    try stdout.print("Result : {d}\n", .{result});
+
+    return result;
 }
 
 fn dumpArgs(w: std.fs.File.Writer, args: []const []const u8) !void {
     for (1.., args) |i, arg| {
         try w.print("#{d} {s}\n", .{ i, arg });
     }
+}
+
+fn dumpAst(w: std.fs.File.Writer, ast: ?parser.Expression) !void {
+    try w.writeAll("AST\n");
+    try if (ast) |vast| vast.prettyPrint(w, 1) else w.writeAll("empty\n");
 }
 
 const help =
