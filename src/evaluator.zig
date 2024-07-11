@@ -2,182 +2,167 @@ const std = @import("std");
 const parser = @import("parser.zig");
 const p = @import("primitives.zig");
 
-pub fn evaluate(expr: parser.Expression) !bool {
-    return switch (expr.value) {
-        .fd => error.UnexpectedFd,
-        .file => error.UnexpectedFile,
-        .int => error.UnexpectedInt,
-        .op_a => |v| try evaluate(v.left.*) and try evaluate(v.right.*),
-        .op_b => |v| opb(v.operand),
-        .op_c => |v| opc(v.operand),
-        .op_d => |v| opd(v.operand),
-        .op_e => |v| ope(v.operand),
+pub fn evaluate(expr: parser.Expression) bool {
+    return switch (expr) {
+        .int => true,
+        .op_a => |v| evaluate(v.left.*) and evaluate(v.right.*),
+        .op_b => |v| opb(v),
+        .op_bang => |v| !evaluate(v.*),
+        .op_bang_equal => |v| !std.mem.eql(u8, v.left, v.right),
+        .op_c => |v| opc(v),
+        .op_d => |v| opd(v),
+        .op_e => |v| ope(v),
         .op_ef => |v| opef(v.left, v.right),
-        .op_eq => |v| relval(v.left) == relval(v.right),
+        .op_eq => |v| v.left == v.right,
         .op_equal => |v| std.mem.eql(u8, v.left, v.right),
-        .op_f => |v| opf(v.operand),
-        .op_g => |v| opg(v.operand),
-        .op_G => |v| opG(v.operand),
-        .op_ge => |v| relval(v.left) >= relval(v.right),
-        .op_gt => |v| relval(v.left) > relval(v.right),
-        .op_h => |v| oph(v.operand),
-        .op_k => |v| opk(v.operand),
-        .op_L => |v| opL(v.operand),
-        .op_le => |v| relval(v.left) <= relval(v.right),
-        .op_lt => |v| relval(v.left) < relval(v.right),
-        .op_n => |v| v.operand.len > 0,
-        .op_N => |v| opN(v.operand),
-        .op_ne => |v| relval(v.left) != relval(v.right),
-        .op_not_equal => |v| !std.mem.eql(u8, v.left, v.right),
+        .op_f => |v| opf(v),
+        .op_g => |v| opg(v),
+        .op_G => |v| opG(v),
+        .op_ge => |v| v.left >= v.right,
+        .op_gt => |v| v.left > v.right,
+        .op_h, .op_L => |v| oph(v),
+        .op_k => |v| opk(v),
+        .op_le => |v| v.left <= v.right,
+        .op_lt => |v| v.left < v.right,
+        .op_N => |v| opN(v),
+        .op_n => |v| v.len > 0,
+        .op_ne => |v| v.left != v.right,
         .op_nt => |v| opnt(v.left, v.right),
-        .op_O => |v| opO(v.operand),
-        .op_o => |v| try evaluate(v.left.*) or try evaluate(v.right.*),
+        .op_o => |v| evaluate(v.left.*) or evaluate(v.right.*),
+        .op_O => |v| opO(v),
         .op_ot => |v| opot(v.left, v.right),
-        .op_p => |v| opp(v.operand),
-        .op_r => |v| opr(v.operand),
-        .op_s => |v| ops(v.operand),
-        .op_S => |v| opS(v.operand),
-        .op_t => |v| opt(v.operand),
-        .op_u => |v| opu(v.operand),
-        .op_w => |v| opw(v.operand),
-        .op_x => |v| opx(v.operand),
-        .op_z => |v| v.operand.len == 0,
+        .op_p => |v| opp(v),
+        .op_r => |v| opr(v),
+        .op_s => |v| ops(v),
+        .op_S => |v| opS(v),
+        .op_t => |v| opt(v),
+        .op_u => |v| opu(v),
+        .op_w => |v| opw(v),
+        .op_x => |v| opx(v),
+        .op_z => |v| v.len == 0,
         .str => |v| v.len > 0,
     };
 }
 
-fn relval(i: p.Int) i64 {
-    return switch (i) {
-        .lit => |v| v,
-        .op_l => |l| @intCast(l.operand.len),
-    };
+const c = @cImport({
+    //@cInclude("stdio.h");
+    @cInclude("errno.h");
+    @cInclude("sys/types.h");
+    @cInclude("sys/stat.h");
+    @cInclude("unistd.h");
+});
+
+fn statOf(f: p.str) !c.struct_stat {
+    var statbuf: c.struct_stat = undefined;
+    if (c.stat(@ptrCast(f), &statbuf) != 0) {
+        return error.StatFailed;
+    }
+    return statbuf;
 }
 
-fn opa(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opb(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISBLK(stat.st_mode);
 }
 
-fn opb(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opc(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISCHR(stat.st_mode);
 }
 
-fn opc(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opd(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISDIR(stat.st_mode);
 }
 
-fn opd(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn ope(f: p.str) bool {
+    return c.access(@ptrCast(f), c.F_OK) == 0;
 }
 
-fn ope(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opef(lf: p.str, rf: p.str) bool {
+    const statLf = statOf(lf) catch return false;
+    const statRf = statOf(rf) catch return false;
+
+    return statLf.st_dev == statLf.st_dev and statLf.st_ino == statRf.st_ino;
 }
 
-fn opef(lf: p.File, rf: p.File) !bool {
-    _ = lf;
-    _ = rf;
-    return error.NotImplemented;
+fn opf(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISREG(stat.st_mode);
 }
 
-fn opf(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opg(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return (stat.st_mode & c.S_ISGID) != 0;
 }
 
-fn opg(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opG(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return stat.st_gid == c.getegid();
 }
 
-fn opG(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn oph(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISLNK(stat.st_mode);
 }
 
-fn oph(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opk(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return (stat.st_mode & c.S_ISVTX) != 0;
 }
 
-fn opk(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opN(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return stat.st_atim.tv_nsec < stat.st_mtim.tv_nsec;
 }
 
-fn opL(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opnt(lf: p.str, rf: p.str) bool {
+    const statLf = statOf(lf) catch return false;
+    const statRf = statOf(rf) catch return false;
+    return statLf.st_mtim.tv_nsec > statRf.st_mtim.tv_nsec;
 }
 
-fn opN(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opO(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return stat.st_uid == c.geteuid();
 }
 
-fn opnt(lf: p.File, rf: p.File) !bool {
-    _ = lf;
-    _ = rf;
-    return error.NotImplemented;
+fn opot(lf: p.str, rf: p.str) bool {
+    return !opnt(lf, rf);
 }
 
-fn opO(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opp(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISFIFO(stat.st_mode);
 }
 
-fn opo(le: p.Expr, re: p.Expr) !bool {
-    _ = le;
-    _ = re;
-    return error.NotImplemented;
+fn opr(f: p.str) bool {
+    return c.access(@ptrCast(f), c.R_OK) == 0;
 }
 
-fn opot(lf: p.File, rf: p.File) !bool {
-    _ = lf;
-    _ = rf;
-    return error.NotImplemented;
+fn ops(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return stat.st_size > 0;
 }
 
-fn opp(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opS(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return c.S_ISSOCK(stat.st_mode);
 }
 
-fn opr(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opt(fd: p.Fd) bool {
+    return c.isatty(fd) != 0;
 }
 
-fn ops(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opu(f: p.str) bool {
+    const stat = statOf(f) catch return false;
+    return (stat.st_mode & c.S_ISUID) != 0;
 }
 
-fn opS(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opw(f: p.str) bool {
+    return c.access(@ptrCast(f), c.W_OK) == 0;
 }
 
-fn opt(fd: p.Fd) !bool {
-    _ = fd;
-    return error.NotImplemented;
-}
-
-fn opu(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
-}
-
-fn opw(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
-}
-
-fn opx(f: p.File) !bool {
-    _ = f;
-    return error.NotImplemented;
+fn opx(f: p.str) bool {
+    return c.access(@ptrCast(f), c.X_OK) == 0;
 }

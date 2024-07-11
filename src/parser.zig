@@ -1,223 +1,395 @@
 const std = @import("std");
 const p = @import("primitives.zig");
 const eql = std.mem.eql;
+const Allocator = std.mem.Allocator;
 
-pub fn parse(allocator: p.Allocator, args: []const p.str) !?Expression {
-    if (args.len == 1) {
+const Args = []const p.str;
+
+pub const Parser = struct {
+    allocator: Allocator,
+
+    const Error = Allocator.Error;
+
+    /// Initialize a Parser.
+    pub fn init(allocator: Allocator) Parser {
+        return Parser{ .allocator = allocator };
+    }
+
+    /// Parse an expression.
+    pub fn parse(self: @This(), args: Args) Error!?ParseResult(Expression) {
+        return parseOr(self, args);
+    }
+
+    /// Parse logical disjunction expression.
+    fn parseOr(self: @This(), args: Args) Error!?ParseResult(Expression) {
+        return self.parseBinaryExpression(args, "-o", "op_o", parseAnd);
+    }
+
+    /// Parse logical conjunction expression.
+    fn parseAnd(self: @This(), args: Args) Error!?ParseResult(Expression) {
+        return self.parseBinaryExpression(args, "-a", "op_a", parsePrimary);
+    }
+
+    /// Parse a primary expression.
+    fn parsePrimary(self: @This(), args: Args) Error!?ParseResult(Expression) {
+        return try self.parseBinary(args, "-eq", "op_eq", operandInt) //
+        orelse try self.parseBinary(args, "-ge", "op_ge", operandInt) //
+        orelse try self.parseBinary(args, "-gt", "op_gt", operandInt) //
+        orelse try self.parseBinary(args, "-le", "op_le", operandInt) //
+        orelse try self.parseBinary(args, "-lt", "op_lt", operandInt) //
+        orelse try self.parseBinary(args, "-ne", "op_ne", operandInt) //
+        orelse try self.parseBinary(args, "-nt", "op_nt", operandString) //
+        orelse try self.parseBinary(args, "-ot", "op_ot", operandString) //
+        orelse try self.parseUnary(args, "-b", "op_b", operandString) //
+        orelse try self.parseUnary(args, "-c", "op_c", operandString) //
+        orelse try self.parseUnary(args, "-d", "op_d", operandString) //
+        orelse try self.parseUnary(args, "-e", "op_e", operandString) //
+        orelse try self.parseUnary(args, "-f", "op_f", operandString) //
+        orelse try self.parseUnary(args, "-g", "op_g", operandString) //
+        orelse try self.parseUnary(args, "-G", "op_G", operandString) //
+        orelse try self.parseUnary(args, "-h", "op_h", operandString) //
+        orelse try self.parseUnary(args, "-k", "op_k", operandString) //
+        orelse try self.parseUnary(args, "-L", "op_L", operandString) //
+        orelse try self.parseUnary(args, "-n", "op_n", operandString) //
+        orelse try self.parseUnary(args, "-N", "op_N", operandString) //
+        orelse try self.parseUnary(args, "-O", "op_O", operandString) //
+        orelse try self.parseUnary(args, "-p", "op_p", operandString) //
+        orelse try self.parseUnary(args, "-r", "op_r", operandString) //
+        orelse try self.parseUnary(args, "-s", "op_s", operandString) //
+        orelse try self.parseUnary(args, "-S", "op_S", operandString) //
+        orelse try self.parseUnary(args, "-t", "op_t", operandFd) //
+        orelse try self.parseUnary(args, "-u", "op_u", operandString) //
+        orelse try self.parseUnary(args, "-w", "op_w", operandString) //
+        orelse try self.parseUnary(args, "-x", "op_x", operandString) //
+        orelse try self.parseUnary(args, "-z", "op_z", operandString) //
+        orelse try self.parseUnary(args, "!", "op_bang", operandExpr) //
+        orelse try self.parseBinary(args, "!=", "op_bang_equal", operandString) //
+        orelse try self.parseBinary(args, "=", "op_equal", operandString) //
+        orelse try self.parseBinary(args, "-ef", "op_ef", operandString) //
+        orelse {
+            if (parseInteger(args)) |int| {
+                return ParseResult(Expression){
+                    .length = 1,
+                    .value = .{ .int = int.value },
+                };
+            } else if (indexes(0, args)) {
+                if (eql(u8, args[0], "(")) {
+                    if (try self.parse(args[1..])) |inner| {
+                        if (indexes(1 + inner.length, args) and eql(u8, args[1 + inner.length], ")")) {
+                            return inner;
+                        }
+                    }
+                }
+                return ParseResult(Expression){
+                    .length = 1,
+                    .value = .{ .str = args[0] },
+                };
+            }
+            return null;
+        };
+    }
+
+    /// Parse a left-associative binary expression by recursive descent.
+    fn parseBinaryExpression(
+        self: @This(),
+        args: Args,
+        comptime operator: p.str,
+        comptime field: p.str,
+        parseOperand: fn (@This(), Args) Error!?ParseResult(Expression),
+    ) Error!?ParseResult(Expression) {
+        var left = try parseOperand(self, args) orelse return null;
+        while (indexes(left.length, args) and eql(u8, args[left.length], operator)) {
+            const right = try parseOperand(self, args[left.length + 1 ..]) orelse return left;
+            left = ParseResult(Expression){
+                .length = left.length + 1 + right.length,
+                .value = @unionInit(Expression, field, Binary(p.Expr){
+                    .left = try create(self.allocator, left.value),
+                    .right = try create(self.allocator, right.value),
+                }),
+            };
+        }
+        return left;
+    }
+
+    /// Parse a binary operation.
+    fn parseBinary(
+        self: @This(),
+        args: Args,
+        comptime operator: p.str,
+        comptime field: p.str,
+        comptime parseOperand: anytype,
+    ) Error!?ParseResult(Expression) {
+        const left = try parseOperand(self, args) orelse return null;
+        if (!indexes(left.length, args) or !eql(u8, args[left.length], operator)) {
+            return null;
+        }
+        const right = try parseOperand(self, args[left.length + 1 ..]) orelse return null;
+
+        return ParseResult(Expression){ .length = left.length + 1 + right.length, .value = @unionInit(Expression, field, Binary(parseOperandValueType(parseOperand)){
+            .left = left.value,
+            .right = right.value,
+        }) };
+    }
+
+    /// Parse an unary operation.
+    fn parseUnary(
+        self: @This(),
+        args: Args,
+        comptime operator: p.str,
+        comptime field: p.str,
+        comptime parseOperand: anytype,
+    ) Error!?ParseResult(Expression) {
+        if (indexes(0, args) and eql(u8, operator, args[0])) {
+            const arg = try parseOperand(self, args[1..]) orelse return null;
+            return ParseResult(Expression){ .length = 1 + arg.length, .value = @unionInit(Expression, field, arg.value) };
+        }
         return null;
     }
-    return try parseOr(allocator, args, 1);
-}
 
-fn parseOr(allocator: p.Allocator, args: []const p.str, i: usize) !Expression {
-    if (i >= args.len) return error.MissingOr;
-
-    var left = try parseAnd(allocator, args, i);
-
-    while (i + left.length < args.len and eql(u8, args[i + left.length], "-o")) {
-        const pLeft = try allocator.create(Expression);
-        pLeft.* = left;
-
-        const pRight = try allocator.create(Expression);
-        pRight.* = try parseAnd(allocator, args, i + left.length + 1);
-
-        left = Expression{
-            .length = left.length + 1 + pRight.*.length,
-            .value = .{ .op_o = .{
-                .left = pLeft,
-                .right = pRight,
-            } },
-        };
+    /// Expect a string operand.
+    fn operandString(self: @This(), args: Args) Error!?ParseResult(p.str) {
+        _ = self;
+        return if (indexes(0, args))
+            ParseResult(p.str){ .length = 1, .value = args[0] }
+        else
+            null;
     }
 
-    return left;
-}
-
-fn parseAnd(allocator: p.Allocator, args: []const p.str, i: usize) !Expression {
-    if (i >= args.len) return error.MissingAnd;
-
-    var left = try parsePrimary(args, i);
-
-    while (i + left.length < args.len and eql(u8, args[i + left.length], "-a")) {
-        const pLeft = try allocator.create(Expression);
-        pLeft.* = left;
-
-        const pRight = try allocator.create(Expression);
-        pRight.* = try parsePrimary(args, i + left.length + 1);
-
-        left = Expression{
-            .length = left.length + 1 + pRight.*.length,
-            .value = .{ .op_a = .{
-                .left = pLeft,
-                .right = pRight,
-            } },
-        };
+    /// Expect an integer operand.
+    fn operandInt(self: @This(), args: Args) Error!?ParseResult(p.Int) {
+        _ = self;
+        const int = parseInteger(args) orelse return null;
+        return ParseResult(p.Int){ .length = int.length, .value = int.value };
     }
 
-    return left;
-}
+    /// Expect a file descriptor operand.
+    fn operandFd(self: @This(), args: Args) Error!?ParseResult(p.Fd) {
+        _ = self;
+        const fd = parseFd(args) orelse return null;
+        return ParseResult(p.Fd){ .length = fd.length, .value = fd.value };
+    }
 
-fn parsePrimary(args: []const p.str, i: usize) !Expression {
-    if (i >= args.len) return error.MissingPrimary;
+    /// Expect an expression operand.
+    fn operandExpr(self: @This(), args: Args) Error!?ParseResult(p.Expr) {
+        const expr = try self.parse(args) orelse return null;
+        return ParseResult(p.Expr){ .length = expr.length, .value = try create(self.allocator, expr.value) };
+    }
 
-    return Expression{ .length = 1, .value = .{ .str = args[i] } };
-}
+    /// Parse a file descriptor.
+    fn parseFd(args: Args) ?ParseResult(p.Fd) {
+        return if (indexes(0, args))
+            return ParseResult(p.Fd){ .length = 1, .value = std.fmt.parseInt(p.Fd, args[0], 10) catch return null }
+        else
+            null;
+    }
 
-pub const Expression = struct {
-    length: usize,
-    value: Value,
+    /// Parse an integer.
+    fn parseInteger(args: Args) ?ParseResult(p.Int) {
+        if (indexes(0, args)) {
+            if (std.fmt.parseInt(p.Int, args[0], 10)) |lit| {
+                return ParseResult(p.Int){ .length = 1, .value = lit };
+            } else |_| if (eql(u8, args[0], "-l") and indexes(1, args)) {
+                return ParseResult(p.Int){ .length = 2, .value = @intCast(args[1].len) };
+            }
+        }
+        return null;
+    }
 
-    pub fn prettyPrint(self: @This(), w: p.Writer, lvl: u64) p.Writer.Error!void {
+    fn parseOperandValueType(parseOperand: anytype) type {
+        return @typeInfo(@typeInfo(@typeInfo(@typeInfo(@TypeOf(parseOperand))
+            .Fn.return_type.?) //
+            .ErrorUnion.payload) //
+            .Optional.child) //
+            .Struct.fields[1].type;
+    }
+};
+
+pub const Expression = union(enum) {
+    int: p.Int,
+    op_a: Binary(p.Expr),
+    op_b: Unary(p.str),
+    op_bang: Unary(p.Expr),
+    op_bang_equal: Binary(p.str),
+    op_c: Unary(p.str),
+    op_d: Unary(p.str),
+    op_e: Unary(p.str),
+    op_ef: Binary(p.str),
+    op_eq: Binary(p.Int),
+    op_equal: Binary(p.str),
+    op_f: Unary(p.str),
+    op_g: Unary(p.str),
+    op_G: Unary(p.str),
+    op_ge: Binary(p.Int),
+    op_gt: Binary(p.Int),
+    op_h: Unary(p.str),
+    op_k: Unary(p.str),
+    op_L: Unary(p.str),
+    op_le: Binary(p.Int),
+    op_lt: Binary(p.Int),
+    op_N: Unary(p.str),
+    op_n: Unary(p.str),
+    op_ne: Binary(p.Int),
+    op_nt: Binary(p.str),
+    op_o: Binary(p.Expr),
+    op_O: Unary(p.str),
+    op_ot: Binary(p.str),
+    op_p: Unary(p.str),
+    op_r: Unary(p.str),
+    op_s: Unary(p.str),
+    op_S: Unary(p.str),
+    op_t: Unary(p.Fd),
+    op_u: Unary(p.str),
+    op_w: Unary(p.str),
+    op_x: Unary(p.str),
+    op_z: Unary(p.str),
+    str: p.str,
+
+    const Writer = std.fs.File.Writer;
+
+    /// Pretty-print a syntax tree.
+    pub fn print(self: @This(), w: Writer, lvl: u64) Writer.Error!void {
         try indent(w, lvl);
-        //try w.print("{d} ", .{self.length}); // display the length of each node
-        try switch (self.value) {
-            .fd => |v| printFd(w, 0, v),
-            .file => |v| printFile(w, 0, v),
+        try switch (self) {
             .int => |v| printInt(w, 0, v),
-            .op_a => |v| prettyPrintBinary(w, lvl, p.Expr, v, printExpr, "-a"),
-            .op_b => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-b"),
-            .op_c => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-c"),
-            .op_d => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-d"),
-            .op_e => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-e"),
-            .op_ef => |v| prettyPrintBinary(w, lvl, p.File, v, printFile, "-ef"),
-            .op_eq => |v| prettyPrintBinary(w, lvl, p.Int, v, printInt, "-eq"),
-            .op_equal => |v| prettyPrintBinary(w, lvl, p.str, v, printStr, "="),
-            .op_f => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-f"),
-            .op_g => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-g"),
-            .op_G => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-G"),
-            .op_ge => |v| prettyPrintBinary(w, lvl, p.Int, v, printInt, "-ge"),
-            .op_gt => |v| prettyPrintBinary(w, lvl, p.Int, v, printInt, "-gt"),
-            .op_h => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-h"),
-            .op_k => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-k"),
-            .op_L => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-L"),
-            .op_le => |v| prettyPrintBinary(w, lvl, p.Int, v, printInt, "-le"),
-            .op_lt => |v| prettyPrintBinary(w, lvl, p.Int, v, printInt, "-lt"),
-            .op_n => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-n"),
-            .op_N => |v| prettyPrintUnary(w, lvl, p.str, v, printStr, "-N"),
-            .op_ne => |v| prettyPrintBinary(w, lvl, p.Int, v, printInt, "-ne"),
-            .op_not_equal => |v| prettyPrintBinary(w, lvl, p.str, v, printStr, "!="),
-            .op_nt => |v| prettyPrintBinary(w, lvl, p.File, v, printFile, "-nt"),
-            .op_O => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-O"),
-            .op_o => |v| prettyPrintBinary(w, lvl, p.Expr, v, printExpr, "-o"),
-            .op_ot => |v| prettyPrintBinary(w, lvl, p.File, v, printFile, "-ot"),
-            .op_p => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-p"),
-            .op_r => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-r"),
-            .op_s => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-s"),
-            .op_S => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-S"),
-            .op_t => |v| prettyPrintUnary(w, lvl, p.Fd, v, printFd, "-t"),
-            .op_u => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-u"),
-            .op_w => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-w"),
-            .op_x => |v| prettyPrintUnary(w, lvl, p.File, v, printFile, "-x"),
-            .op_z => |v| prettyPrintUnary(w, lvl, p.str, v, printStr, "-z"),
+            .op_a => |v| printBinary(w, lvl, printExpr, v, "-a"),
+            .op_b => |v| printUnary(w, lvl, printFile, v, "-b"),
+            .op_bang => |v| printUnary(w, lvl, printExpr, v, "!"),
+            .op_bang_equal => |v| printBinary(w, lvl, printStr, v, "!="),
+            .op_c => |v| printUnary(w, lvl, printFile, v, "-c"),
+            .op_d => |v| printUnary(w, lvl, printFile, v, "-d"),
+            .op_e => |v| printUnary(w, lvl, printFile, v, "-e"),
+            .op_ef => |v| printBinary(w, lvl, printFile, v, "-ef"),
+            .op_eq => |v| printBinary(w, lvl, printInt, v, "-eq"),
+            .op_equal => |v| printBinary(w, lvl, printStr, v, "="),
+            .op_f => |v| printUnary(w, lvl, printFile, v, "-f"),
+            .op_g => |v| printUnary(w, lvl, printFile, v, "-g"),
+            .op_G => |v| printUnary(w, lvl, printFile, v, "-G"),
+            .op_ge => |v| printBinary(w, lvl, printInt, v, "-ge"),
+            .op_gt => |v| printBinary(w, lvl, printInt, v, "-gt"),
+            .op_h => |v| printUnary(w, lvl, printFile, v, "-h"),
+            .op_k => |v| printUnary(w, lvl, printFile, v, "-k"),
+            .op_L => |v| printUnary(w, lvl, printFile, v, "-L"),
+            .op_le => |v| printBinary(w, lvl, printInt, v, "-le"),
+            .op_lt => |v| printBinary(w, lvl, printInt, v, "-lt"),
+            .op_n => |v| printUnary(w, lvl, printFile, v, "-n"),
+            .op_N => |v| printUnary(w, lvl, printStr, v, "-N"),
+            .op_ne => |v| printBinary(w, lvl, printInt, v, "-ne"),
+            .op_nt => |v| printBinary(w, lvl, printFile, v, "-nt"),
+            .op_o => |v| printBinary(w, lvl, printExpr, v, "-o"),
+            .op_O => |v| printUnary(w, lvl, printFile, v, "-O"),
+            .op_ot => |v| printBinary(w, lvl, printFile, v, "-ot"),
+            .op_p => |v| printUnary(w, lvl, printFile, v, "-p"),
+            .op_r => |v| printUnary(w, lvl, printFile, v, "-r"),
+            .op_s => |v| printUnary(w, lvl, printFile, v, "-s"),
+            .op_S => |v| printUnary(w, lvl, printFile, v, "-S"),
+            .op_t => |v| printUnary(w, lvl, printFd, v, "-t"),
+            .op_u => |v| printUnary(w, lvl, printFile, v, "-u"),
+            .op_w => |v| printUnary(w, lvl, printFile, v, "-w"),
+            .op_x => |v| printUnary(w, lvl, printFile, v, "-x"),
+            .op_z => |v| printUnary(w, lvl, printStr, v, "-z"),
             .str => |v| printStr(w, 0, v),
         };
     }
 
-    fn indent(w: p.Writer, lvl: u64) p.Writer.Error!void {
+    /// Indent with spaces.
+    fn indent(w: Writer, lvl: u64) Writer.Error!void {
         for (0..lvl * 2) |_| {
             try w.writeByte(' ');
         }
     }
 
-    fn prettyPrintBinary(
-        w: p.Writer,
+    /// Pretty-print a binary operation.
+    fn printBinary(
+        w: Writer,
         lvl: u64,
-        comptime T: type,
-        v: p.Binary(T),
-        printer: fn (p.Writer, u64, T) p.Writer.Error!void,
+        printer: anytype,
+        v: Binary(printerValueType(printer)),
         repr: p.str,
     ) !void {
-        try printRepr(w, repr);
+        try printOperator(w, repr);
         try printer(w, lvl + 1, v.left);
         try printer(w, lvl + 1, v.right);
     }
 
-    fn prettyPrintUnary(
-        w: p.Writer,
+    /// Pretty-print an unary operation.
+    fn printUnary(
+        w: Writer,
         lvl: u64,
-        comptime T: type,
-        v: p.Unary(T),
-        printer: fn (p.Writer, u64, T) p.Writer.Error!void,
+        printer: anytype,
+        v: Unary(printerValueType(printer)),
         repr: p.str,
     ) !void {
-        try printRepr(w, repr);
-        try printer(w, lvl + 1, v.operand);
+        try printOperator(w, repr);
+        try printer(w, lvl + 1, v);
     }
 
-    fn printRepr(w: p.Writer, repr: p.str) p.Writer.Error!void {
-        try w.print("{s}\n", .{repr});
+    /// Pretty-print the operator of an operation.
+    fn printOperator(w: Writer, operator: p.str) Writer.Error!void {
+        try w.print("{s}\n", .{operator});
     }
 
-    fn printInt(w: p.Writer, lvl: u64, val: p.Int) p.Writer.Error!void {
-        switch (val) {
-            .lit => |v| {
-                try indent(w, lvl);
-                try w.print("int: {d}\n", .{v});
-            },
-            .op_l => |v| {
-                try prettyPrintUnary(w, lvl, p.str, v, printStr, "-l");
-            },
-        }
+    /// Pretty-print an integer.
+    fn printInt(w: Writer, lvl: u64, v: p.Int) Writer.Error!void {
+        try indent(w, lvl);
+        try w.print("int: {d}\n", .{v});
     }
 
-    fn printFd(w: p.Writer, lvl: u64, v: p.Fd) p.Writer.Error!void {
+    /// Pretty-print a file descriptor.
+    fn printFd(w: Writer, lvl: u64, v: p.Fd) Writer.Error!void {
         try indent(w, lvl);
         try w.print("fd: {d}\n", .{v});
     }
 
-    fn printFile(w: p.Writer, lvl: u64, v: p.File) p.Writer.Error!void {
+    /// Pretty-print a file.
+    fn printFile(w: Writer, lvl: u64, v: p.str) Writer.Error!void {
         try indent(w, lvl);
-        try w.print("file: {s}\n", .{v});
+        try w.print("file: '{s}'\n", .{v});
     }
 
-    fn printStr(w: p.Writer, lvl: u64, v: p.str) p.Writer.Error!void {
+    /// Pretty-print a string.
+    fn printStr(w: Writer, lvl: u64, v: p.str) Writer.Error!void {
         try indent(w, lvl);
-        try w.print("str: {s}\n", .{v});
+        try w.print("str: '{s}'\n", .{v});
     }
 
-    fn printExpr(w: p.Writer, lvl: u64, v: p.Expr) p.Writer.Error!void {
-        try v.*.prettyPrint(w, lvl);
+    /// Pretty-print an expression.
+    fn printExpr(w: Writer, lvl: u64, v: p.Expr) Writer.Error!void {
+        try v.*.print(w, lvl);
     }
 
-    const Value = union(enum) {
-        fd: p.Fd,
-        file: p.str,
-        int: p.Int,
-        op_a: p.Binary(p.Expr),
-        op_b: p.Unary(p.File),
-        op_c: p.Unary(p.File),
-        op_d: p.Unary(p.File),
-        op_e: p.Unary(p.File),
-        op_ef: p.Binary(p.File),
-        op_eq: p.Binary(p.Int),
-        op_equal: p.Binary(p.str),
-        op_f: p.Unary(p.File),
-        op_g: p.Unary(p.File),
-        op_G: p.Unary(p.File),
-        op_ge: p.Binary(p.Int),
-        op_gt: p.Binary(p.Int),
-        op_h: p.Unary(p.File),
-        op_k: p.Unary(p.File),
-        op_L: p.Unary(p.File),
-        op_le: p.Binary(p.Int),
-        op_lt: p.Binary(p.Int),
-        op_N: p.Unary(p.File),
-        op_n: p.Unary(p.str),
-        op_ne: p.Binary(p.Int),
-        op_not_equal: p.Binary(p.str),
-        op_nt: p.Binary(p.File),
-        op_o: p.Binary(p.Expr),
-        op_O: p.Unary(p.File),
-        op_ot: p.Binary(p.File),
-        op_p: p.Unary(p.File),
-        op_r: p.Unary(p.File),
-        op_s: p.Unary(p.File),
-        op_S: p.Unary(p.File),
-        op_t: p.Unary(p.Fd),
-        op_u: p.Unary(p.File),
-        op_w: p.Unary(p.File),
-        op_x: p.Unary(p.File),
-        op_z: p.Unary(p.str),
-        str: p.str,
-    };
+    fn printerValueType(printer: anytype) type {
+        return @typeInfo(@TypeOf(printer)).Fn.params[2].type.?;
+    }
 };
+
+/// Allocates an object and assigns its value, then returns it as a constant.
+fn create(allocator: Allocator, value: anytype) !*const @TypeOf(value) {
+    const ptr = try allocator.create(@TypeOf(value));
+    ptr.* = value;
+    return ptr;
+}
+
+/// Determines whether a slice has an index.
+///
+/// If `true` is returned, then any natural *n* &le; *i* indexes *slice*.
+fn indexes(i: usize, slice: anytype) bool {
+    return i < slice.len;
+}
+
+pub fn ParseResult(comptime T: type) type {
+    return struct {
+        length: usize,
+        value: T,
+    };
+}
+
+pub fn Unary(comptime T: type) type {
+    return T;
+}
+
+pub fn Binary(comptime T: type) type {
+    return struct {
+        left: T,
+        right: T,
+    };
+}

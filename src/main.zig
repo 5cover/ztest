@@ -1,17 +1,18 @@
 const std = @import("std");
-const parser = @import("parser.zig");
+const p = @import("parser.zig");
 const evaluator = @import("evaluator.zig");
 
 pub fn main() !u8 {
     const stdout = std.io.getStdOut().writer();
+    var arena = a: {
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        const allocator = gpa.allocator();
+        break :a std.heap.ArenaAllocator.init(allocator);
+    };
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    const arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try std.process.argsAlloc(arena.allocator());
 
     if (args.len == 2) {
         if (std.mem.eql(u8, args[1], "--version")) {
@@ -27,20 +28,18 @@ pub fn main() !u8 {
     //try dumpArgs(stdout, args);
 
     const result: u2 = run: {
-        const ast = parser.parse(allocator, args) catch |err| {
+        // skip first argument (program location)
+        const ast = p.Parser.init(arena.allocator()).parse(args[1..]) catch |err| {
             std.log.err("{}\n", .{err});
             break :run 2;
         };
 
         try dumpAst(stdout, ast);
 
-        break :run if (ast) |vast| @intFromBool(!(evaluator.evaluate(vast) catch |err| {
-            std.log.err("{}\n", .{err});
-            break :run 2;
-        })) else 1;
+        break :run if (ast) |vast| @intFromBool(!evaluator.evaluate(vast.value)) else 1;
     };
 
-    try stdout.print("Result : {d}\n", .{result});
+    try stdout.print("Result: {d}\n", .{result});
 
     return result;
 }
@@ -51,9 +50,9 @@ fn dumpArgs(w: std.fs.File.Writer, args: []const []const u8) !void {
     }
 }
 
-fn dumpAst(w: std.fs.File.Writer, ast: ?parser.Expression) !void {
+fn dumpAst(w: std.fs.File.Writer, ast: ?p.ParseResult(p.Expression)) !void {
     try w.writeAll("AST\n");
-    try if (ast) |vast| vast.prettyPrint(w, 1) else w.writeAll("empty\n");
+    try if (ast) |vast| vast.value.print(w, 1) else w.writeAll("empty\n");
 }
 
 const help =
