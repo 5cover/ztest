@@ -1,5 +1,3 @@
 zig-cache/**
 zig-out/**
-.antlr/**
-build.zig
-build.zig.zon
+test.log

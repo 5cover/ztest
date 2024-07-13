@@ -1,38 +1,66 @@
 const std = @import("std");
 const p = @import("primitives.zig");
-const eql = std.mem.eql;
-const Allocator = std.mem.Allocator;
 
-const Args = []const p.str;
+const CriticalError = p.Allocator.Error;
+
+pub const Error = CriticalError || error{
+    InvalidInt,
+    InvalidFd,
+    ArgumentMissing,
+};
+
+/// Optional diagnostics used for reporting useful errors
+pub const Diagnostic = struct {
+    arg: ?p.str = undefined,
+
+    pub fn report(self: @This(), out: p.Writer, err: Error) !void {
+        switch (err) {
+            error.ArgumentMissing => try out.writeAll("argument expected"),
+            error.InvalidInt => try out.print("invalid integer '{s}'", .{self.arg orelse ""}),
+            error.InvalidFd => try out.print("invalid file descriptor '{s}'", .{self.arg orelse ""}),
+            else => try out.print("error parsing argument '{s}': {}", .{ self.arg orelse "", err }),
+        }
+    }
+};
 
 pub const Parser = struct {
-    allocator: Allocator,
-
-    const Error = Allocator.Error;
+    allocator: p.Allocator,
+    diag: *Diagnostic,
 
     /// Initialize a Parser.
-    pub fn init(allocator: Allocator) Parser {
-        return Parser{ .allocator = allocator };
+    pub fn init(allocator: p.Allocator, diag: *Diagnostic) Parser {
+        return Parser{
+            .allocator = allocator,
+            .diag = diag,
+        };
+    }
+
+    /// Must be called when an error is created and returned (return error.*)
+    fn err(self: @This(), err_: anytype, arg: ?p.str) @TypeOf(err_) {
+        self.diag.* = .{ .arg = arg };
+        return err_;
     }
 
     /// Parse an expression.
-    pub fn parse(self: @This(), args: Args) Error!?ParseResult(Expression) {
+    pub fn parse(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
         return parseOr(self, args);
     }
 
     /// Parse logical disjunction expression.
-    fn parseOr(self: @This(), args: Args) Error!?ParseResult(Expression) {
+    fn parseOr(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
         return self.parseBinaryExpression(args, "-o", "op_o", parseAnd);
     }
 
     /// Parse logical conjunction expression.
-    fn parseAnd(self: @This(), args: Args) Error!?ParseResult(Expression) {
+    fn parseAnd(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
         return self.parseBinaryExpression(args, "-a", "op_a", parsePrimary);
     }
 
     /// Parse a primary expression.
-    fn parsePrimary(self: @This(), args: Args) Error!?ParseResult(Expression) {
-        return try self.parseBinary(args, "-eq", "op_eq", operandInt) //
+    fn parsePrimary(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
+        return try self.parseBracketed(args) //
+        orelse try self.parseBinary(args, "-ef", "op_ef", operandString) //
+        orelse try self.parseBinary(args, "-eq", "op_eq", operandInt) //
         orelse try self.parseBinary(args, "-ge", "op_ge", operandInt) //
         orelse try self.parseBinary(args, "-gt", "op_gt", operandInt) //
         orelse try self.parseBinary(args, "-le", "op_le", operandInt) //
@@ -40,6 +68,10 @@ pub const Parser = struct {
         orelse try self.parseBinary(args, "-ne", "op_ne", operandInt) //
         orelse try self.parseBinary(args, "-nt", "op_nt", operandString) //
         orelse try self.parseBinary(args, "-ot", "op_ot", operandString) //
+        orelse try self.parseBinary(args, "!=", "op_bang_equal", operandString) //
+        orelse try self.parseBinary(args, "=", "op_equal", operandString) //
+        orelse try self.parseBinary(args, "==", "op_equal", operandString) // non-standard but still supported
+        // Parsed binary before unary for maximum munch
         orelse try self.parseUnary(args, "-b", "op_b", operandString) //
         orelse try self.parseUnary(args, "-c", "op_c", operandString) //
         orelse try self.parseUnary(args, "-d", "op_d", operandString) //
@@ -63,23 +95,13 @@ pub const Parser = struct {
         orelse try self.parseUnary(args, "-x", "op_x", operandString) //
         orelse try self.parseUnary(args, "-z", "op_z", operandString) //
         orelse try self.parseUnary(args, "!", "op_bang", operandExpr) //
-        orelse try self.parseBinary(args, "!=", "op_bang_equal", operandString) //
-        orelse try self.parseBinary(args, "=", "op_equal", operandString) //
-        orelse try self.parseBinary(args, "-ef", "op_ef", operandString) //
         orelse {
-            if (parseInteger(args)) |int| {
+            if (self.parseInt(args)) |int| {
                 return ParseResult(Expression){
                     .length = 1,
                     .value = .{ .int = int.value },
                 };
-            } else if (indexes(0, args)) {
-                if (eql(u8, args[0], "(")) {
-                    if (try self.parse(args[1..])) |inner| {
-                        if (indexes(1 + inner.length, args) and eql(u8, args[1 + inner.length], ")")) {
-                            return inner;
-                        }
-                    }
-                }
+            } else |_| if (p.indexes(0, args)) {
                 return ParseResult(Expression){
                     .length = 1,
                     .value = .{ .str = args[0] },
@@ -89,22 +111,34 @@ pub const Parser = struct {
         };
     }
 
+    fn parseBracketed(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
+        if (p.indexes(2, args) and p.streq(args[0], "(")) {
+            if (try self.parse(args[1..])) |inner| {
+                if (p.indexes(1 + inner.length, args) and p.streq(args[1 + inner.length], ")")) {
+                    return inner;
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// Parse a left-associative binary expression by recursive descent.
     fn parseBinaryExpression(
         self: @This(),
-        args: Args,
+        args: p.Args,
         comptime operator: p.str,
         comptime field: p.str,
-        parseOperand: fn (@This(), Args) Error!?ParseResult(Expression),
+        descent_parser: fn (@This(), p.Args) Error!?ParseResult(Expression),
     ) Error!?ParseResult(Expression) {
-        var left = try parseOperand(self, args) orelse return null;
-        while (indexes(left.length, args) and eql(u8, args[left.length], operator)) {
-            const right = try parseOperand(self, args[left.length + 1 ..]) orelse return left;
+        var left = try descent_parser(self, args) orelse return null;
+        while (p.indexes(left.length, args) and p.streq(args[left.length], operator)) {
+            const right = try descent_parser(self, args[left.length + 1 ..]) orelse return left;
             left = ParseResult(Expression){
                 .length = left.length + 1 + right.length,
                 .value = @unionInit(Expression, field, Binary(p.Expr){
-                    .left = try create(self.allocator, left.value),
-                    .right = try create(self.allocator, right.value),
+                    .left = try p.create(self.allocator, left.value),
+                    .right = try p.create(self.allocator, right.value),
                 }),
             };
         }
@@ -114,18 +148,20 @@ pub const Parser = struct {
     /// Parse a binary operation.
     fn parseBinary(
         self: @This(),
-        args: Args,
+        args: p.Args,
         comptime operator: p.str,
         comptime field: p.str,
-        comptime parseOperand: anytype,
+        comptime parse_operand: anytype,
     ) Error!?ParseResult(Expression) {
-        const left = try parseOperand(self, args) orelse return null;
-        if (!indexes(left.length, args) or !eql(u8, args[left.length], operator)) {
+        const left_e = parse_operand(self, args);
+        const iOperator = if (left_e) |v| v.length else |_| 1;
+        if (!p.indexes(iOperator, args) or !p.streq(args[iOperator], operator)) {
             return null;
         }
-        const right = try parseOperand(self, args[left.length + 1 ..]) orelse return null;
+        const left = try left_e;
+        const right = try parse_operand(self, args[iOperator + 1 ..]);
 
-        return ParseResult(Expression){ .length = left.length + 1 + right.length, .value = @unionInit(Expression, field, Binary(parseOperandValueType(parseOperand)){
+        return ParseResult(Expression){ .length = left.length + 1 + right.length, .value = @unionInit(Expression, field, Binary(parseOperandValueType(parse_operand)){
             .left = left.value,
             .right = right.value,
         }) };
@@ -134,72 +170,75 @@ pub const Parser = struct {
     /// Parse an unary operation.
     fn parseUnary(
         self: @This(),
-        args: Args,
+        args: p.Args,
         comptime operator: p.str,
         comptime field: p.str,
-        comptime parseOperand: anytype,
+        comptime parse_operand: anytype,
     ) Error!?ParseResult(Expression) {
-        if (indexes(0, args) and eql(u8, operator, args[0])) {
-            const arg = try parseOperand(self, args[1..]) orelse return null;
+        if (p.indexes(0, args) and p.streq(operator, args[0])) {
+            const arg = parse_operand(self, args[1..]) catch |e|
+                return if (p.errorSetContains(CriticalError, e)) e else null;
             return ParseResult(Expression){ .length = 1 + arg.length, .value = @unionInit(Expression, field, arg.value) };
         }
         return null;
     }
 
     /// Expect a string operand.
-    fn operandString(self: @This(), args: Args) Error!?ParseResult(p.str) {
-        _ = self;
-        return if (indexes(0, args))
+    fn operandString(self: @This(), args: p.Args) Error!ParseResult(p.str) {
+        return if (p.indexes(0, args))
             ParseResult(p.str){ .length = 1, .value = args[0] }
         else
-            null;
+            self.err(error.ArgumentMissing, null);
     }
 
     /// Expect an integer operand.
-    fn operandInt(self: @This(), args: Args) Error!?ParseResult(p.Int) {
-        _ = self;
-        const int = parseInteger(args) orelse return null;
+    fn operandInt(self: @This(), args: p.Args) Error!ParseResult(p.Int) {
+        const int = try self.parseInt(args);
         return ParseResult(p.Int){ .length = int.length, .value = int.value };
     }
 
     /// Expect a file descriptor operand.
-    fn operandFd(self: @This(), args: Args) Error!?ParseResult(p.Fd) {
-        _ = self;
-        const fd = parseFd(args) orelse return null;
+    fn operandFd(self: @This(), args: p.Args) Error!ParseResult(p.Fd) {
+        const fd = try self.parseFd(args);
         return ParseResult(p.Fd){ .length = fd.length, .value = fd.value };
     }
 
     /// Expect an expression operand.
-    fn operandExpr(self: @This(), args: Args) Error!?ParseResult(p.Expr) {
-        const expr = try self.parse(args) orelse return null;
-        return ParseResult(p.Expr){ .length = expr.length, .value = try create(self.allocator, expr.value) };
+    fn operandExpr(self: @This(), args: p.Args) Error!ParseResult(p.Expr) {
+        const expr = try self.parse(args) orelse return self.err(error.ArgumentMissing, null);
+        return ParseResult(p.Expr){
+            .length = expr.length,
+            .value = try p.create(self.allocator, expr.value),
+        };
     }
 
     /// Parse a file descriptor.
-    fn parseFd(args: Args) ?ParseResult(p.Fd) {
-        return if (indexes(0, args))
-            return ParseResult(p.Fd){ .length = 1, .value = std.fmt.parseInt(p.Fd, args[0], 10) catch return null }
+    fn parseFd(self: @This(), args: p.Args) Error!ParseResult(p.Fd) {
+        return if (p.indexes(0, args))
+            ParseResult(p.Fd){
+                .length = 1,
+                .value = std.fmt.parseInt(p.Fd, args[0], 10) catch return error.InvalidFd,
+            }
         else
-            null;
+            self.err(error.ArgumentMissing, null);
     }
 
     /// Parse an integer.
-    fn parseInteger(args: Args) ?ParseResult(p.Int) {
-        if (indexes(0, args)) {
-            if (std.fmt.parseInt(p.Int, args[0], 10)) |lit| {
-                return ParseResult(p.Int){ .length = 1, .value = lit };
-            } else |_| if (eql(u8, args[0], "-l") and indexes(1, args)) {
-                return ParseResult(p.Int){ .length = 2, .value = @intCast(args[1].len) };
-            }
-        }
-        return null;
+    fn parseInt(self: @This(), args: p.Args) Error!ParseResult(p.Int) {
+        return if (!p.indexes(0, args))
+            self.err(error.ArgumentMissing, null)
+        else if (std.fmt.parseInt(p.Int, args[0], 10)) |lit|
+            ParseResult(p.Int){ .length = 1, .value = lit }
+        else |_| if (p.streq(args[0], "-l") and p.indexes(1, args))
+            ParseResult(p.Int){ .length = 2, .value = @intCast(args[1].len) }
+        else
+            return self.err(error.InvalidInt, args[0]);
     }
 
-    fn parseOperandValueType(parseOperand: anytype) type {
-        return @typeInfo(@typeInfo(@typeInfo(@typeInfo(@TypeOf(parseOperand))
+    fn parseOperandValueType(parse_operand: anytype) type {
+        return @typeInfo(@typeInfo(@typeInfo(@TypeOf(parse_operand))
             .Fn.return_type.?) //
             .ErrorUnion.payload) //
-            .Optional.child) //
             .Struct.fields[1].type;
     }
 };
@@ -244,10 +283,8 @@ pub const Expression = union(enum) {
     op_z: Unary(p.str),
     str: p.str,
 
-    const Writer = std.fs.File.Writer;
-
     /// Pretty-print a syntax tree.
-    pub fn print(self: @This(), w: Writer, lvl: u64) Writer.Error!void {
+    pub fn print(self: @This(), w: p.Writer, lvl: u64) p.Writer.Error!void {
         try indent(w, lvl);
         try switch (self) {
             .int => |v| printInt(w, 0, v),
@@ -292,7 +329,7 @@ pub const Expression = union(enum) {
     }
 
     /// Indent with spaces.
-    fn indent(w: Writer, lvl: u64) Writer.Error!void {
+    fn indent(w: p.Writer, lvl: u64) p.Writer.Error!void {
         for (0..lvl * 2) |_| {
             try w.writeByte(' ');
         }
@@ -300,7 +337,7 @@ pub const Expression = union(enum) {
 
     /// Pretty-print a binary operation.
     fn printBinary(
-        w: Writer,
+        w: p.Writer,
         lvl: u64,
         printer: anytype,
         v: Binary(printerValueType(printer)),
@@ -313,7 +350,7 @@ pub const Expression = union(enum) {
 
     /// Pretty-print an unary operation.
     fn printUnary(
-        w: Writer,
+        w: p.Writer,
         lvl: u64,
         printer: anytype,
         v: Unary(printerValueType(printer)),
@@ -324,36 +361,36 @@ pub const Expression = union(enum) {
     }
 
     /// Pretty-print the operator of an operation.
-    fn printOperator(w: Writer, operator: p.str) Writer.Error!void {
+    fn printOperator(w: p.Writer, operator: p.str) p.Writer.Error!void {
         try w.print("{s}\n", .{operator});
     }
 
     /// Pretty-print an integer.
-    fn printInt(w: Writer, lvl: u64, v: p.Int) Writer.Error!void {
+    fn printInt(w: p.Writer, lvl: u64, v: p.Int) p.Writer.Error!void {
         try indent(w, lvl);
         try w.print("int: {d}\n", .{v});
     }
 
     /// Pretty-print a file descriptor.
-    fn printFd(w: Writer, lvl: u64, v: p.Fd) Writer.Error!void {
+    fn printFd(w: p.Writer, lvl: u64, v: p.Fd) p.Writer.Error!void {
         try indent(w, lvl);
         try w.print("fd: {d}\n", .{v});
     }
 
     /// Pretty-print a file.
-    fn printFile(w: Writer, lvl: u64, v: p.str) Writer.Error!void {
+    fn printFile(w: p.Writer, lvl: u64, v: p.str) p.Writer.Error!void {
         try indent(w, lvl);
         try w.print("file: '{s}'\n", .{v});
     }
 
     /// Pretty-print a string.
-    fn printStr(w: Writer, lvl: u64, v: p.str) Writer.Error!void {
+    fn printStr(w: p.Writer, lvl: u64, v: p.str) p.Writer.Error!void {
         try indent(w, lvl);
         try w.print("str: '{s}'\n", .{v});
     }
 
     /// Pretty-print an expression.
-    fn printExpr(w: Writer, lvl: u64, v: p.Expr) Writer.Error!void {
+    fn printExpr(w: p.Writer, lvl: u64, v: p.Expr) p.Writer.Error!void {
         try v.*.print(w, lvl);
     }
 
@@ -361,20 +398,6 @@ pub const Expression = union(enum) {
         return @typeInfo(@TypeOf(printer)).Fn.params[2].type.?;
     }
 };
-
-/// Allocates an object and assigns its value, then returns it as a constant.
-fn create(allocator: Allocator, value: anytype) !*const @TypeOf(value) {
-    const ptr = try allocator.create(@TypeOf(value));
-    ptr.* = value;
-    return ptr;
-}
-
-/// Determines whether a slice has an index.
-///
-/// If `true` is returned, then any natural *n* &le; *i* indexes *slice*.
-fn indexes(i: usize, slice: anytype) bool {
-    return i < slice.len;
-}
 
 pub fn ParseResult(comptime T: type) type {
     return struct {

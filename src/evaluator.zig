@@ -8,13 +8,13 @@ pub fn evaluate(expr: parser.Expression) bool {
         .op_a => |v| evaluate(v.left.*) and evaluate(v.right.*),
         .op_b => |v| opb(v),
         .op_bang => |v| !evaluate(v.*),
-        .op_bang_equal => |v| !std.mem.eql(u8, v.left, v.right),
+        .op_bang_equal => |v| !p.streq(v.left, v.right),
         .op_c => |v| opc(v),
         .op_d => |v| opd(v),
         .op_e => |v| ope(v),
         .op_ef => |v| opef(v.left, v.right),
         .op_eq => |v| v.left == v.right,
-        .op_equal => |v| std.mem.eql(u8, v.left, v.right),
+        .op_equal => |v| p.streq(v.left, v.right),
         .op_f => |v| opf(v),
         .op_g => |v| opg(v),
         .op_G => |v| opG(v),
@@ -53,11 +53,11 @@ const c = @cImport({
 });
 
 fn statOf(f: p.str) !c.struct_stat {
-    var statbuf: c.struct_stat = undefined;
-    if (c.stat(@ptrCast(f), &statbuf) != 0) {
+    var stat_buf: c.struct_stat = undefined;
+    if (c.stat(@ptrCast(f), &stat_buf) != 0) {
         return error.StatFailed;
     }
-    return statbuf;
+    return stat_buf;
 }
 
 fn opb(f: p.str) bool {
@@ -80,10 +80,10 @@ fn ope(f: p.str) bool {
 }
 
 fn opef(lf: p.str, rf: p.str) bool {
-    const statLf = statOf(lf) catch return false;
-    const statRf = statOf(rf) catch return false;
+    const stat_lf = statOf(lf) catch return false;
+    const stat_rf = statOf(rf) catch return false;
 
-    return statLf.st_dev == statLf.st_dev and statLf.st_ino == statRf.st_ino;
+    return stat_lf.st_dev == stat_lf.st_dev and stat_lf.st_ino == stat_rf.st_ino;
 }
 
 fn opf(f: p.str) bool {
@@ -117,9 +117,9 @@ fn opN(f: p.str) bool {
 }
 
 fn opnt(lf: p.str, rf: p.str) bool {
-    const statLf = statOf(lf) catch return false;
-    const statRf = statOf(rf) catch return false;
-    return statLf.st_mtim.tv_nsec > statRf.st_mtim.tv_nsec;
+    const stat_lf = statOf(lf) catch return false;
+    const stat_rf = statOf(rf) catch return false;
+    return stat_lf.st_mtim.tv_nsec > stat_rf.st_mtim.tv_nsec;
 }
 
 fn opO(f: p.str) bool {
