@@ -69,6 +69,7 @@ pub const Parser = struct {
         orelse try self.parseBinary(args, "-nt", "op_nt", operandString) //
         orelse try self.parseBinary(args, "-ot", "op_ot", operandString) //
         orelse try self.parseBinary(args, "!=", "op_bang_equal", operandString) //
+        orelse try self.parseUnary(args, "!", "op_bang", operandExpr) //
         orelse try self.parseBinary(args, "=", "op_equal", operandString) //
         orelse try self.parseBinary(args, "==", "op_equal", operandString) // non-standard but still supported
         // Parsed binary before unary for maximum munch
@@ -94,7 +95,6 @@ pub const Parser = struct {
         orelse try self.parseUnary(args, "-w", "op_w", operandString) //
         orelse try self.parseUnary(args, "-x", "op_x", operandString) //
         orelse try self.parseUnary(args, "-z", "op_z", operandString) //
-        orelse try self.parseUnary(args, "!", "op_bang", operandExpr) //
         orelse {
             if (self.parseInt(args)) |int| {
                 return ParseResult(Expression){
@@ -113,6 +113,12 @@ pub const Parser = struct {
 
     fn parseBracketed(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
         if (p.indexes(2, args) and p.streq(args[0], "(")) {
+            if (p.streq(args[2], ")")) {
+                if (try self.parseBinary(args, "=", "op_equal", operandString)) |streq| {
+                    return streq;
+                }
+            }
+
             if (try self.parse(args[1..])) |inner| {
                 if (p.indexes(1 + inner.length, args) and p.streq(args[1 + inner.length], ")")) {
                     return inner;
