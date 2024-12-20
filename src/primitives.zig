@@ -27,7 +27,7 @@ pub fn streq(a: str, b: str) bool {
 
 /// Is an error (*needle*) is part of an error set type (*haystack*)?
 pub fn errorSetContains(haystack: type, needle: anyerror) bool {
-    for (@typeInfo(haystack).ErrorSet.?) |e| {
+    for (@typeInfo(haystack).error_set.?) |e| {
         if (streq(e.name, @errorName(needle))) {
             return true;
         }

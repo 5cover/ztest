@@ -43,7 +43,18 @@ pub const Parser = struct {
 
     /// Parse an expression.
     pub fn parse(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
-        return parseOr(self, args);
+        return self.parseNegation(args);
+    }
+
+    fn parseNegation(self: @This(), args: p.Args) Error!?ParseResult(Expression) {
+        if (p.indexes(0, args) and p.streq(args[0], "!")) {
+            const right = try self.parseNegation(args[1..]) orelse return Error.ArgumentMissing;
+            return ParseResult(Expression){
+                .length = 1 + right.length,
+                .value = @unionInit(Expression, "op_bang", try p.create(self.allocator, right.value)),
+            };
+        }
+        return self.parseOr(args);
     }
 
     /// Parse logical disjunction expression.
@@ -69,7 +80,6 @@ pub const Parser = struct {
         orelse try self.parseBinary(args, "-nt", "op_nt", operandString) //
         orelse try self.parseBinary(args, "-ot", "op_ot", operandString) //
         orelse try self.parseBinary(args, "!=", "op_bang_equal", operandString) //
-        orelse try self.parseUnary(args, "!", "op_bang", operandExpr) //
         orelse try self.parseBinary(args, "=", "op_equal", operandString) //
         orelse try self.parseBinary(args, "==", "op_equal", operandString) // non-standard but still supported
         // Parsed binary before unary for maximum munch
@@ -209,15 +219,6 @@ pub const Parser = struct {
         return ParseResult(p.Fd){ .length = fd.length, .value = fd.value };
     }
 
-    /// Expect an expression operand.
-    fn operandExpr(self: @This(), args: p.Args) Error!ParseResult(p.Expr) {
-        const expr = try self.parse(args) orelse return self.err(error.ArgumentMissing, null);
-        return ParseResult(p.Expr){
-            .length = expr.length,
-            .value = try p.create(self.allocator, expr.value),
-        };
-    }
-
     /// Parse a file descriptor.
     fn parseFd(self: @This(), args: p.Args) Error!ParseResult(p.Fd) {
         return if (p.indexes(0, args))
@@ -243,9 +244,9 @@ pub const Parser = struct {
 
     fn parseOperandValueType(parse_operand: anytype) type {
         return @typeInfo(@typeInfo(@typeInfo(@TypeOf(parse_operand))
-            .Fn.return_type.?) //
-            .ErrorUnion.payload) //
-            .Struct.fields[1].type;
+            .@"fn".return_type.?) //
+            .error_union.payload) //
+            .@"struct".fields[1].type;
     }
 };
 
